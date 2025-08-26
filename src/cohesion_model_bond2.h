@@ -419,7 +419,7 @@ namespace ContactModels {
                 stress = fmax(stress, stress*ratioTensionCompression_[i][j]);
             if(normalBondStiffness_[i][j] <= 1e-15)
                 error->one(FLERR,"Bond settings: In case of stress breakage, the normal bond stiffness can't be <= 0!");
-            double cdf_one = 0.5*(1.1*(2.0*maxrad*(1.0+bondmultiplier_[i][j]))/minrad + 1.1 * stress / (normalBondStiffness_[i][j] * minrad));
+            double cdf_one = (2.0)*0.5*(1.1*(2.0*maxrad*(1.0+bondmultiplier_[i][j]))/minrad + 0.0*(1.1 * stress / normalBondStiffness_[i][j] * minrad));
             cdf_all = cdf_one > cdf_all ? cdf_one : cdf_all;
 
           }
