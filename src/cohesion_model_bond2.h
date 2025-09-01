@@ -419,14 +419,14 @@ namespace ContactModels {
                 stress = fmax(stress, stress*ratioTensionCompression_[i][j]);
             if(normalBondStiffness_[i][j] <= 1e-15)
                 error->one(FLERR,"Bond settings: In case of stress breakage, the normal bond stiffness can't be <= 0!");
-            double cdf_one = (2.0)*0.5*(1.1*(2.0*maxrad*(1.0+bondmultiplier_[i][j]))/minrad + 0.0*(1.1 * stress / normalBondStiffness_[i][j] * minrad));
+            double cdf_one = (1.0+bondmultiplier_[i][j]);
             cdf_all = cdf_one > cdf_all ? cdf_one : cdf_all;
 
           }
         }
-        std::cout<<"cdf:"<<cdf_all<<std::endl;
+        
       }
-
+      
       if (heatbreakflag_)
       {
         breakmode_ = BREAKSTYLE_STRESS_TEMP2;
@@ -439,7 +439,7 @@ namespace ContactModels {
       neighbor->register_contact_dist_factor(cdf_all);
       compute_bond_counter_ = static_cast<ComputeBondCounter*>(modify->find_compute_style_strict("bond/counter", 0));
     }
-
+    
     /* ---------------------------------------------------------------------- */
 
     void beginPass(SurfacesIntersectData&, ForceData&, ForceData&)
