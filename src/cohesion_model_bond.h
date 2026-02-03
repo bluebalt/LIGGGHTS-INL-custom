@@ -73,9 +73,9 @@ namespace MODEL_PARAMS
   static const char * DISSIPATION_NORM_TORQUE_BOND = "dissipationNormalTorqueBond";
   static const char * DISSIPATION_TANG_TORQUE_BOND = "dissipationTangentialTorqueBond";
 
-  inline static MatrixProperty* createRadiusMultiplierBond(PropertyRegistry & registry, const char * caller, bool sanity_checks)
+  inline static MatrixProperty* createBondDistanceFraction(PropertyRegistry & registry, const char * caller, bool sanity_checks)
   {
-    return createPerTypePairProperty(registry, "radiusMultiplierBond", caller, sanity_checks, 0.0);
+    return createPerTypePairProperty(registry, "bondDistanceFraction", caller, sanity_checks, 0.0);
   }
 
   /* ---------------------------------------------------------------------- */
@@ -171,11 +171,6 @@ namespace MODEL_PARAMS
     return createScalarProperty(registry, "tsCreateBond", caller, sanity_checks, 0.0);
   }
 
-  inline static MatrixProperty* createCreateDistanceBond(PropertyRegistry & registry, const char * caller, bool sanity_checks)
-  {
-    return createPerTypePairProperty(registry, "createDistanceBond", caller, sanity_checks, 0.0);
-  }
-
 } // ns MODEL_PARAMS
 
 /* ---------------------------------------------------------------------- */
@@ -200,7 +195,7 @@ namespace ContactModels {
       elastic_potential_offset_(-1),
       dissipation_history_offset_(-1),
       fix_dissipated_(NULL),
-      radiusMultiplier_(NULL),
+      bondDistanceFraction_(NULL),
       normalBondStiffness_(NULL),
       tangentialBondStiffness_(NULL),
       fn_dissipation_(NULL),
@@ -213,7 +208,6 @@ namespace ContactModels {
       ratioTensionCompression_(NULL),
       tanFrictionAngle_(NULL),
       tsCreateBond_(0.0),
-      createDistanceBond_(NULL),
       stressbreakflag_(false),
       heatbreakflag_(false),
       tensionflag_(true),
@@ -322,11 +316,11 @@ namespace ContactModels {
       fix_strenghtening_factor_ = static_cast<FixPropertyAtom*>(modify->find_fix_property("bond_strengthening_factor","property/atom","vector",0,0,"cohesion bond",false));
       fix_bond_random_id_ = static_cast<FixPropertyAtom*>(modify->find_fix_property("bond_random_id","property/atom","scalar",0,0,"cohesion bond",false));
 
-      registry.registerProperty("radiusMultiplierBond", &MODEL_PARAMS::createRadiusMultiplierBond);
+      registry.registerProperty("bondDistanceFraction", &MODEL_PARAMS::createBondDistanceFraction);
       registry.registerProperty("normalBondStiffness", &MODEL_PARAMS::createNormalBondStiffness);
       registry.registerProperty("tangentialBondStiffness", &MODEL_PARAMS::createTangentialBondStiffness);
 
-      registry.connect("radiusMultiplierBond", radiusMultiplier_,"cohesion bond");
+      registry.connect("bondDistanceFraction", bondDistanceFraction_,"cohesion bond");
       registry.connect("normalBondStiffness", normalBondStiffness_,"cohesion bond");
       registry.connect("tangentialBondStiffness", tangentialBondStiffness_,"cohesion bond");
 
@@ -377,18 +371,10 @@ namespace ContactModels {
       }
 
       // create bond settings
-      if (createbond_always_flag_)
+      if (!createbond_always_flag_)
       {
-        registry.registerProperty("createDistanceBond", &MODEL_PARAMS::createCreateDistanceBond);
-        registry.connect("createDistanceBond", createDistanceBond_, "cohesion bond");
-      }
-      else
-      {
-        // required settings
         registry.registerProperty("tsCreateBond", &MODEL_PARAMS::createTsCreateBond);
-        registry.registerProperty("createDistanceBond", &MODEL_PARAMS::createCreateDistanceBond);
         registry.connect("tsCreateBond", tsCreateBond_, "cohesion bond");
-        registry.connect("createDistanceBond", createDistanceBond_, "cohesion bond");
       }
 
       // break up settings
@@ -408,16 +394,15 @@ namespace ContactModels {
         registry.connect("maxDistanceBond", maxDist_,"cohesion bond");
         breakmode_ = BREAKSTYLE_SIMPLE;
 
-        // calculate the contactDistanceFactor
+        const double maxrad = registry.max_radius();
         for (int i=1; i<max_type+1; i++)
         {
           for(int j=1;j<max_type+1;j++)
           {
-
-            double cdf_one = 1.1 * 0.5*maxDist_[i][j]/minrad;
-
+            double creation = (1.0 + bondDistanceFraction_[i][j]) * 2.0 * maxrad;
+            double dist = std::max(maxDist_[i][j], creation);
+            double cdf_one = 1.1 * 0.5 * dist / minrad;
             cdf_all = cdf_one > cdf_all ? cdf_one : cdf_all;
-
           }
         }
       }
@@ -443,22 +428,18 @@ namespace ContactModels {
         }
         breakmode_ = BREAKSTYLE_STRESS;
 
-        // calculate the contactDistanceFactor
-        // it depends only on the normalStress due to normal distance!
-        //  --> maxSigma_, normalBondStiffness_, minrad!
+        const double maxrad = registry.max_radius();
         for (int i=1; i<max_type+1; i++)
         {
           for (int j=1; j<max_type+1; j++)
           {
-
             double stress = maxSigma_[i][j];
             if (useRatioTC_)
                 stress = fmax(stress, stress*ratioTensionCompression_[i][j]);
             if(normalBondStiffness_[i][j] <= 1e-15)
                 error->one(FLERR,"Bond settings: In case of stress breakage, the normal bond stiffness can't be <= 0!");
-            double cdf_one = 0.5*(1.1*createDistanceBond_[i][j]/minrad + 1.1 * stress / (normalBondStiffness_[i][j] * minrad));
+            double cdf_one = 0.5*(1.1 * (1.0 + bondDistanceFraction_[i][j]) * maxrad / minrad + 1.1 * stress / (normalBondStiffness_[i][j] * minrad));
             cdf_all = cdf_one > cdf_all ? cdf_one : cdf_all;
-
           }
         }
       }
@@ -498,20 +479,17 @@ namespace ContactModels {
       const int j = scdata.j;
       const int itype = scdata.itype;
       const int jtype = scdata.jtype;
-      const double lambda = radiusMultiplier_[itype][jtype];
-      if (lambda < SMALL_COHESION_MODEL_BOND)
-        return; // do nothing in case of rb = 0.0
+      // bonds are considered for all type pairs; distance fraction controls creation range
 
       // history values
       double * const contflag = &scdata.contact_history[history_offset_];
       double * const contact_pos = &scdata.contact_history[history_offset_+2]; // 3-elements
 
       // gather required properties
-      // the distance r is the distance between the two particle centers
-      // in case of a wall sqrt(scdata.rsq) is the distance to the intersection point on the wall, thus, assuming
-      // that the wall is a particle of the same size, the distance of the centers is twice that distance
-      double r_create = (scdata.is_wall ? 2.0 : 1.0) * sqrt(scdata.rsq);
-      double r = (scdata.is_wall ? r_create/2. : r_create);
+      const double radi = scdata.radi;
+      const double radj = scdata.radj;
+      // center-to-center distance
+      double r = (scdata.is_wall ? 2.0 : 1.0) * sqrt(scdata.rsq);
 
       // temporay vectors for intermediate results;
       double tmp1[3], tmp2[3];
@@ -521,7 +499,7 @@ namespace ContactModels {
           if (contflag[0] < SMALL_COHESION_MODEL_BOND)
           {
 
-            const bool create_bond_A =  (createbond_always_flag_ || (update->ntimestep == static_cast<int>(tsCreateBond_))) && (r_create < createDistanceBond_[itype][jtype]);
+            const bool create_bond_A =  (createbond_always_flag_ || (update->ntimestep == static_cast<int>(tsCreateBond_))) && (r <= (radi + radj) * (1.0 + bondDistanceFraction_[itype][jtype]));
 
             if (create_bond_A)
                 createBond(scdata, r);
@@ -529,7 +507,7 @@ namespace ContactModels {
             {
 
                 const double * const bond_rand_id = fix_bond_random_id_->vector_atom;
-                const bool create_bond_B = bond_rand_id && !scdata.is_wall && (update->ntimestep < bond_rand_id[i]) && MathExtraLiggghts::compDouble(bond_rand_id[i],bond_rand_id[j]) && (r_create < createDistanceBond_[itype][jtype]);
+                const bool create_bond_B = bond_rand_id && !scdata.is_wall && (update->ntimestep < bond_rand_id[i]) && MathExtraLiggghts::compDouble(bond_rand_id[i],bond_rand_id[j]) && (r <= (radi + radj) * (1.0 + bondDistanceFraction_[itype][jtype]));
 
                 if (create_bond_B)
                     createBond(scdata, r);
@@ -570,8 +548,6 @@ namespace ContactModels {
       vectorCopy3D(torque_tang_ptr, torque_tang);
 
       // gather more properties
-      const double radi = scdata.radi;
-      const double radj = scdata.radj;
       double delta[3];
       if (scdata.is_wall)
       {
@@ -603,7 +579,7 @@ namespace ContactModels {
       double * const omegaj = scdata.is_wall ? wall_omega : atom->omega[j];
       const double kn_pb = normalBondStiffness_[itype][jtype];
       const double kt_pb = tangentialBondStiffness_[itype][jtype];
-      const double rb = lambda* (scdata.is_wall ? radi : std::min(radi,radj));
+      const double rb = scdata.is_wall ? radi : (radi * radj) / (radi + radj);
       const double A = M_PI*rb*rb;
       const double J = 0.5*A*rb*rb;
       const double I = 0.5*J;
@@ -986,9 +962,7 @@ namespace ContactModels {
       // check if cohesion model is working for this type-pair
       const int itype = sidata.itype;
       const int jtype = sidata.jtype;
-      const double lambda = radiusMultiplier_[itype][jtype];
-      if (lambda < SMALL_COHESION_MODEL_BOND)
-        return; // do nothing in case of rb=0.0
+      // always consider bonds; distance fraction handled in surfacesClose
 
       //initial settings for first contact
 
@@ -999,7 +973,7 @@ namespace ContactModels {
       //create bond
       // if createbondflag_ && correct timestep && within range
 
-      //if( (update->ntimestep == static_cast<int>(tsCreateBond_) && createbondflag_ && r < createDistanceBond_[itype][jtype]) )
+      //if( (update->ntimestep == static_cast<int>(tsCreateBond_) && createbondflag_ && r < ??? ) )
       //  createBond(sidata, r);
 
       // TODO create member function that does the calculation and gets the velocities as input parameter.
@@ -1074,7 +1048,6 @@ namespace ContactModels {
     int elastic_potential_offset_;
     int dissipation_history_offset_;
     class FixPropertyAtom *fix_dissipated_;
-    double ** radiusMultiplier_;
     double ** normalBondStiffness_;
     double ** tangentialBondStiffness_;
     double ** fn_dissipation_;
@@ -1094,7 +1067,7 @@ namespace ContactModels {
     double ** tanFrictionAngle_;
 
     double tsCreateBond_;
-    double ** createDistanceBond_;
+    double ** bondDistanceFraction_;
 
   protected:
     bool stressbreakflag_; // false if max dist break, true if stress break
